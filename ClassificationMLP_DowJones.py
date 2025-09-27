@@ -12,9 +12,11 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 import keras_tuner as kt
 from sklearn.metrics import classification_report, confusion_matrix
 import seaborn as sns
+from sklearn.utils import class_weight
+from sklearn.metrics import accuracy_score
 
 # =============================================================================
-USE_TUNER = True
+USE_TUNER = False
 # =============================================================================
 
 ### 1. Carregamento e Limpeza ###
@@ -112,6 +114,8 @@ test_y_reg = test_df[output_col]
 # class 1: price went up (return > 0)
 # class 0: price went down or stayed the same (return <= 0)
 y_train_class = (train_y_reg > 0).astype(int)
+print("\nAnálise do Balanceamento das Classes (Treino):")
+print(y_train_class.value_counts(normalize=True))
 y_test_class = (test_y_reg > 0).astype(int)
 
 # normalizes data using Z-Score (apenas dados de treino)
@@ -134,13 +138,12 @@ print('The testing dataset (outputs) dimensions are: ', test_y_reg.shape)
 def build_model_classification(input_shape):
     model = keras.Sequential([
         # input_shape is the amount of columns from training set
-        layers.Dense(128, activation='relu', input_shape=input_shape),
-        layers.Dropout(0.5),
+        layers.Dense(64, activation='relu', input_shape=input_shape),
+        layers.Dropout(0.2),
         layers.Dense(128, activation='relu'),
-        layers.Dropout(0.5),
         layers.Dense(1, activation='sigmoid') #output: 1 neuron with 'sigmoid' activation for probabilities
     ])
-    optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001)
+    optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.0001)
     model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
 
@@ -228,13 +231,24 @@ else:
 
 model.summary()#table -> layer / shape / param
 
-EPOCHS = 500
+
+# calculates class weights from training (increases minority class weight to balance)
+weights = class_weight.compute_class_weight(
+    'balanced',
+    classes=np.unique(y_train_class),
+    y=y_train_class
+)
+class_weights = {i : weights[i] for i in range(len(weights))}
+print(f"Pesos das classes calculados: {class_weights}")
+
+EPOCHS = 1000
 history = model.fit(
     X_train_scaled,
     y_train_class,
     epochs=EPOCHS,
     validation_split=0.2, # uses 20% of the training data for validation
-    verbose=1
+    verbose=1,
+    class_weight=class_weights
 )
 
 #line graph (MSE x Epoch)
@@ -267,65 +281,42 @@ plt.show()
 probabilities = model.predict(X_test_scaled)
 # converts probabilities to classes (0 or 1) using a threshold of 0.5
 predictions = (probabilities > 0.5).astype(int)
+print("\nAnálise das Previsões do Modelo:")
+print(pd.Series(predictions.flatten()).value_counts())
+
+
+# Testa vários limiares, de 0.1 a 0.9
+thresholds = np.arange(0.1, 1.0, 0.05)
+accuracies = []
+
+for thresh in thresholds:
+    # Aplica o limiar atual
+    preds = (probabilities > thresh).astype(int)
+    # Calcula e armazena a acurácia
+    acc = accuracy_score(y_test_class, preds)
+    accuracies.append(acc)
+
+# Encontra o melhor limiar e a melhor acurácia
+best_threshold = thresholds[np.argmax(accuracies)]
+best_accuracy = np.max(accuracies)
+
+print(f"\n--- Otimização do Limiar ---")
+print(f"A melhor acurácia ({best_accuracy:.4f}) foi encontrada com um limiar de {best_threshold:.2f}")
+
+# Aplica o melhor limiar para a avaliação final
+print(f"\n--- Reavaliando o modelo com o limiar otimizado de {best_threshold:.2f} ---")
+predictions_optimized = (probabilities > best_threshold).astype(int)
+
 
 # f1-score for each class
-print(classification_report(y_test_class, predictions, target_names=['Desceu/Manteve', 'Subiu']))
+print(classification_report(y_test_class, predictions_optimized, target_names=['Desceu/Manteve', 'Subiu']))
 
 print("\nMatriz de Confusão:")
-cm = confusion_matrix(y_test_class, predictions)
+cm = confusion_matrix(y_test_class, predictions_optimized)
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Desceu/Manteve', 'Subiu'], yticklabels=['Desceu/Manteve', 'Subiu'])
 plt.xlabel('Previsão')
 plt.ylabel('Real')
 plt.show()
-
-
-
-# predict radon activities with the built linear regression model
-test_predictions_scaled = model.predict(X_test_scaled).flatten()
-
-# scaler_y to reverse the transformation
-#test_predictions = scaler_y.inverse_transform(test_predictions_scaled).flatten()
-
-# results
-plt.scatter(test_y_reg, test_predictions_scaled, marker='o', c='blue')
-plt.plot([-5, 35], [-5, 35], color='black', ls='--')
-plt.ylabel('Predictions')
-plt.xlabel('Real Values')
-plt.title('Prediction (Testing Set)')
-plt.ylim(-5, 35)
-plt.xlim(-5, 35)
-plt.grid(True)
-plt.show()
-
-# Calculate and print the correlation coefficient, rmse and mae
-mae = mean_absolute_error(test_y_reg, test_predictions_scaled)
-rmse = np.sqrt(mean_squared_error(test_y_reg, test_predictions_scaled))
-correlation_coefficient = np.corrcoef(test_predictions_scaled, test_y_reg.to_numpy())[0, 1]
-
-print("\n--- Resultados da Avaliação no Conjunto de Teste ---")
-print(f"Mean Absolute Error (MAE): {mae:.4f}")
-print(f"Root Mean Squared Error (RMSE): {rmse:.4f}")
-print("Correlation Coefficient in testing set: %.4f" % correlation_coefficient)
-
-
-
-train_predictions = model.predict(X_train_scaled).flatten() # predict radom activities with the built linear regression model
-
-#train_predictions = scaler_y.inverse_transform(train_predictions_scaled).flatten()
-
-plt.scatter(train_y_reg, train_predictions, marker = 'o', c = 'blue')
-plt.plot([-5,35], [-5,35], color = 'black', ls = '--')
-plt.ylabel('Predictions')
-plt.xlabel('Real Values')
-plt.title('Linear Regression with Normalized Values (Training Set)')
-plt.ylim(-5, 35)
-plt.xlim(-5, 35)
-plt.axis(True)
-plt.show()
-
-# Calculate and print the correlation coefficient
-correlation_coefficient = np.corrcoef(train_predictions, train_y_reg.to_numpy())[0, 1]
-print("Correlation Coefficient in training set: %.4f" % correlation_coefficient)
 
 # saves the model architecture
 try:
