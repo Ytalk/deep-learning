@@ -20,7 +20,7 @@ USE_TUNER = False
 # =============================================================================
 
 ### 1. Carregamento e Limpeza ###
-data = pd.read_csv('dow_jones_index.data') # Loading dataset
+data = pd.read_csv('datasets/dow_jones_index.data') # Loading dataset
 data.info() # inspecting columns and data types from "data" dataframe
 
 # fixes columns with '$' symbol and converts columns to numeric type (float)
@@ -135,39 +135,52 @@ print('The testing dataset (outputs) dimensions are: ', test_y_reg.shape)
 
 # Function to define model architecture
 # (USE_TUNER = False)
-def build_model_classification(input_shape):
+def build_model_classification_fixed(input_shape):
     model = keras.Sequential([
         # input_shape is the amount of columns from training set
-        layers.Dense(64, activation='relu', input_shape=input_shape),
-        layers.Dropout(0.2),
-        layers.Dense(128, activation='relu'),
+        layers.Dense(192, activation='relu', input_shape=input_shape),
+        layers.Dropout(0.4),
+        layers.Dense(96, activation='relu'),
+        layers.Dropout(0.1),
+        layers.Dense(256, activation='relu'),
+        layers.Dropout(0.5),
         layers.Dense(1, activation='sigmoid') #output: 1 neuron with 'sigmoid' activation for probabilities
     ])
     optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.0001)
     model.compile(loss='binary_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     return model
 
+
 # (USE_TUNER = True)
 def build_model_classification_tuned(hp):
     model = keras.Sequential()
-
     model.add(layers.Input(shape=(len(input_cols),)))
 
-    hp_units_1 = hp.Int('units_1', min_value=32, max_value=256, step=32)
-    model.add(layers.Dense(units=hp_units_1, activation='relu'))
+    hp_optimizer = hp.Choice('optimizer', values=['adam', 'rmsprop'])
 
-    hp_dropout = hp.Float('dropout', min_value=0.2, max_value=0.5, step=0.1)
-    model.add(layers.Dropout(hp_dropout))
+    hp_learning_rate = hp.Choice('learning_rate', values=[1e-3, 1e-4, 5e-5])
 
-    hp_units_2 = hp.Int('units_2', min_value=32, max_value=256, step=32)
-    model.add(layers.Dense(units=hp_units_2, activation='relu'))
+    # O tuner vai decidir se o modelo terá 1, 2 ou 3 camadas ocultas
+    for i in range(hp.Int('num_layers', 1, 3)):
+        model.add(layers.Dense(
+            # Ajusta o número de neurônios em cada camada
+            units=hp.Int(f'units_{i}', min_value=32, max_value=256, step=32),
+            activation='relu'
+        ))
+        model.add(layers.Dropout(
+            rate=hp.Float(f'dropout_{i}', min_value=0.1, max_value=0.5, step=0.1)
+        ))
 
     model.add(layers.Dense(1, activation='sigmoid'))
 
-    hp_learning_rate = hp.Choice('learning_rate', values=[1e-3, 1e-4])
+    if hp_optimizer == 'adam':
+        optimizer = keras.optimizers.Adam(learning_rate=hp_learning_rate)
+    else:
+        optimizer = keras.optimizers.RMSprop(learning_rate=hp_learning_rate)
 
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=hp_learning_rate), loss='binary_crossentropy', metrics=['accuracy'])
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['accuracy'])
     return model
+
 
 
 if USE_TUNER:
@@ -176,18 +189,18 @@ if USE_TUNER:
     tuner = kt.RandomSearch(
         build_model_classification_tuned,
         objective=kt.Objective("val_accuracy", direction="max"),
-        max_trials=15, # number of different combinations to test
-        executions_per_trial=3, # how many times to train each combination
+        max_trials=100, # number of different combinations to test
+        executions_per_trial=2, # how many times to train each combination
         directory='my_dir_clf',
         project_name='stock_classification_v2'
     )
 
-    tuner.search(X_train_scaled, y_train_class, epochs=100, validation_split=0.2)
+    tuner.search(X_train_scaled, y_train_class, epochs=50, validation_split=0.2)
 
 
     print("\n--- Extraindo resultados de todos os trials do Tuner ---")
 
-    all_trials = tuner.oracle.get_best_trials(num_trials=50) # 50 best trials
+    all_trials = tuner.oracle.get_best_trials(num_trials=100) # 100 best trials
 
     results_list = []
 
@@ -216,18 +229,24 @@ if USE_TUNER:
 
     # pick the BEST HYPERPARAMETERS, not the model
     best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
-    print(f"""
-    A busca terminou. Os melhores hiperparâmetros são:
-    - Unidades na camada 1: {best_hps.get('units_1')}
-    - Taxa de Dropout: {best_hps.get('dropout')}
-    - Unidades na camada 2: {best_hps.get('units_2')}
-    - Taxa de Aprendizado: {best_hps.get('learning_rate')}
-    """)
+
+    print("\nA busca terminou. Os melhores hiperparâmetros são:")
+    print(f"- Otimizador: {best_hps.get('optimizer')}")
+    print(f"- Taxa de Aprendizado: {best_hps.get('learning_rate')}")
+
+    # Loop para imprimir os parâmetros de cada camada encontrada
+    num_layers = best_hps.get('num_layers')
+    print(f"- Número de Camadas: {num_layers}")
+    for i in range(num_layers):
+        print(f"  - Camada {i+1}:")
+        print(f"    - Unidades: {best_hps.get(f'units_{i}')}")
+        print(f"    - Dropout: {best_hps.get(f'dropout_{i}')}")
+
 
     model = tuner.hypermodel.build(best_hps) # build the model
 else:
     print("--- MODO: Treinamento com Modelo Fixo ---")
-    model = build_model_classification([len(input_cols)])
+    model = build_model_classification_fixed([len(input_cols)])
 
 model.summary()#table -> layer / shape / param
 
@@ -241,12 +260,14 @@ weights = class_weight.compute_class_weight(
 class_weights = {i : weights[i] for i in range(len(weights))}
 print(f"Pesos das classes calculados: {class_weights}")
 
-EPOCHS = 1000
+EPOCHS = 500
 history = model.fit(
     X_train_scaled,
     y_train_class,
     epochs=EPOCHS,
-    validation_split=0.2, # uses 20% of the training data for validation
+    validation_split=0.2, # uses 20% of the training data for validation (validation_data is recomended)
+    #validation_data=(X_val_scaled, y_val_class),
+    shuffle=False,
     verbose=1,
     class_weight=class_weights
 )
@@ -281,7 +302,7 @@ plt.show()
 probabilities = model.predict(X_test_scaled)
 # converts probabilities to classes (0 or 1) using a threshold of 0.5
 predictions = (probabilities > 0.5).astype(int)
-print("\nAnálise das Previsões do Modelo:")
+print("\nAnálise das Previsões do Modelo (Test):")
 print(pd.Series(predictions.flatten()).value_counts())
 
 
@@ -317,6 +338,20 @@ sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=['Desceu/Manteve'
 plt.xlabel('Previsão')
 plt.ylabel('Real')
 plt.show()
+
+
+
+train_probabilities = model.predict(X_train_scaled).flatten()
+train_predictions_optimized = (train_probabilities > best_threshold).astype(int)
+train_accuracy = accuracy_score(y_train_class, train_predictions_optimized)
+
+print("\n--- Resultados da Avaliação no Conjunto de TREINO ---")
+print(f"Acurácia no conjunto de Treino (usando limiar {best_threshold:.2f}): {train_accuracy:.4f}")
+
+print("\nRelatório de Classificação (Treino):")
+print(classification_report(y_train_class, train_predictions_optimized, target_names=['Desceu/Manteve', 'Subiu']))
+
+
 
 # saves the model architecture
 try:

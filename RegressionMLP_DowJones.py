@@ -16,7 +16,7 @@ USE_TUNER = False
 # =============================================================================
 
 ### Preprocessing ###
-data = pd.read_csv('dow_jones_index.data') # Loading dataset
+data = pd.read_csv('datasets/dow_jones_index.data') # Loading dataset
 data.info() # inspecting columns and data types from "data" dataframe
 
 # fixes columns with '$' symbol and converts columns to numeric type (float)
@@ -130,13 +130,15 @@ def build_model_regression_fixed(input_shape):
     # Sequential = Feedforward Neural Network
     model = keras.Sequential([
         # input_shape is the amount of columns from training set
-        layers.Dense(128, activation='relu', input_shape=input_shape),
+        layers.Dense(32, activation='relu', input_shape=input_shape),
+        layers.Dropout(0.2),
+        layers.Dense(160, activation='relu'),
+        layers.Dropout(0.1),
+        layers.Dense(96, activation='relu'),
         layers.Dropout(0.4),
-        layers.Dense(128, activation='relu'),
-        #layers.Dropout(0.4),
         layers.Dense(1)#output layer here  Saída linear para regressão
     ])
-    optimizer = tf.keras.optimizers.Adam(learning_rate = 0.001)#RMSprop
+    optimizer = tf.keras.optimizers.RMSprop(learning_rate = 0.0001)#RMSprop
     # Mean Squared Error (MSE) is the default loss function in regression models
     model.compile(loss = 'mse', optimizer = optimizer, metrics = ['mse','mae'])
     return model
@@ -144,21 +146,29 @@ def build_model_regression_fixed(input_shape):
 # (USE_TUNER = True)
 def build_model_regression_tuned(hp):
     model = keras.Sequential()
+    model.add(layers.Input(shape=(len(input_cols),)))
 
-    hp_units_1 = hp.Int('units_1', min_value=32, max_value=256, step=32)
-    model.add(layers.Dense(units=hp_units_1, activation='relu', input_shape=[len(input_cols)]))
+    hp_optimizer = hp.Choice('optimizer', values=['adam', 'rmsprop'])
 
-    hp_dropout_1 = hp.Float('dropout_1', min_value=0.1, max_value=0.5, step=0.1)
-    model.add(layers.Dropout(hp_dropout_1))
+    hp_learning_rate = hp.Choice('learning_rate', values=[1e-3, 1e-4, 5e-5])
 
-    hp_units_2 = hp.Int('units_2', min_value=32, max_value=256, step=32)
-    model.add(layers.Dense(units=hp_units_2, activation='relu'))
+    for i in range(hp.Int('num_layers', 1, 3)):
+        model.add(layers.Dense(
+            units=hp.Int(f'units_{i}', min_value=32, max_value=256, step=32),
+            activation='relu'
+        ))
+        model.add(layers.Dropout(
+            rate=hp.Float(f'dropout_{i}', min_value=0.1, max_value=0.5, step=0.1)
+        ))
 
     model.add(layers.Dense(1))
 
-    hp_learning_rate = hp.Choice('learning_rate', values=[1e-2, 1e-3, 1e-4])
+    if hp_optimizer == 'adam':
+        optimizer = keras.optimizers.Adam(learning_rate=hp_learning_rate)
+    else:
+        optimizer = keras.optimizers.RMSprop(learning_rate=hp_learning_rate)
 
-    model.compile(optimizer=keras.optimizers.Adam(learning_rate=hp_learning_rate), loss='mse', metrics=['mae'])
+    model.compile(optimizer=optimizer, loss='mse', metrics=['mae'])
 
     return model
 
@@ -168,20 +178,19 @@ if USE_TUNER:
     # configures the hyperparameter "searcher"
     tuner = kt.RandomSearch(
         build_model_regression_tuned,
-        #objective='val_loss',
         objective=kt.Objective("val_loss", direction="min"),
-        max_trials=15, # number of different combinations to test
-        executions_per_trial=3, # how many times to train each combination
+        max_trials=100, # number of different combinations to test
+        executions_per_trial=2, # how many times to train each combination
         directory='my_dir_reg',
         project_name='stock_regression'
     )
 
-    tuner.search(X_train_scaled, train_y, epochs=100, validation_split=0.2)
+    tuner.search(X_train_scaled, train_y, epochs=50, validation_split=0.2)
 
 
     print("\n--- Extraindo resultados de todos os trials do Tuner ---")
 
-    all_trials = tuner.oracle.get_best_trials(num_trials=50) # 50 best trials
+    all_trials = tuner.oracle.get_best_trials(num_trials=100) # 100 best trials
 
     results_list = []
 
@@ -204,19 +213,25 @@ if USE_TUNER:
     print("\n--- Top 15 Melhores Combinações Encontradas ---")
     print(results_df.head(15).to_string())
 
-    results_df.to_csv('tuner_classification_results.csv', index=False)
-    print("\nResultados completos salvos em 'tuner_classification_results.csv'")
+    results_df.to_csv('tuner_regression_results.csv', index=False)
+    print("\nResultados completos salvos em 'tuner_regression_results.csv'")
 
 
     # pick the BEST HYPERPARAMETERS, not the model
     best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
-    print(f"""
-    A busca terminou. Os melhores hiperparâmetros são:
-    - Unidades na camada 1: {best_hps.get('units_1')}
-    - Taxa de Dropout: {best_hps.get('dropout')}
-    - Unidades na camada 2: {best_hps.get('units_2')}
-    - Taxa de Aprendizado: {best_hps.get('learning_rate')}
-    """)
+
+    print("\nA busca terminou. Os melhores hiperparâmetros são:")
+    print(f"- Otimizador: {best_hps.get('optimizer')}")
+    print(f"- Taxa de Aprendizado: {best_hps.get('learning_rate')}")
+
+    # Loop para imprimir os parâmetros de cada camada encontrada
+    num_layers = best_hps.get('num_layers')
+    print(f"- Número de Camadas: {num_layers}")
+    for i in range(num_layers):
+        print(f"  - Camada {i+1}:")
+        print(f"    - Unidades: {best_hps.get(f'units_{i}')}")
+        print(f"    - Dropout: {best_hps.get(f'dropout_{i}')}")
+
 
     model = tuner.hypermodel.build(best_hps) # build the model
 else:
@@ -231,7 +246,8 @@ history = model.fit(
     X_train_scaled,
     train_y,#y_train_scaled
     epochs=EPOCHS,
-    validation_split=0.2, # uses 20% of the training data for validation
+    validation_split=0.2, # uses 20% of the training data for validation (validation_data is recomended)
+    shuffle=False,
     verbose=1
 )
 
